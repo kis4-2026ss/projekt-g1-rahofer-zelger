@@ -10,7 +10,7 @@ Develop and evaluate an autonomous, role‑bounded Multi‑Agent System (MAS) th
 
 **Four Validation Criteria:**
 1. **Workflow & Auditability**  
-   - Automated GitHub issues, strict **Conventional Commits**, auto‑generated Markdown docs.  
+   - Automated issues, strict **Conventional Commits**, auto‑generated Markdown docs.  
    - **Zero boundary violations** – log analysis must confirm no agent performs out‑of‑role actions (e.g., Scrum Master never writes code).
 2. **Functional Compliance**  
    - 100% mathematical accuracy for canonical Factorio production chains (10 itesms/min advanced circuit and a seperate 2,5 items/m express splitter layout).  
@@ -32,7 +32,7 @@ Develop and evaluate an autonomous, role‑bounded Multi‑Agent System (MAS) th
 | Development Stage | Agent(s) | Tooling & Infrastructure |
 | :--- | :--- | :--- |
 | Requirement Elicitation | POA | Chat interface, Gherkin processor, Markdown writer |
-| Sprint Planning & Tasking | SMA | LangGraph state machine, GitHub Issues API, JSON backlog |
+| Sprint Planning & Tasking | SMA | LangGraph state machine, Issues, JSON backlog |
 | Code Implementation | DA | Python/C#, Git CLI, Conventional Commits hooks |
 | Validation & Testing | QATA | Pytest, output diff interceptor |
 | MCP Server Implementation | DA | MCP SDK, integration test sandbox |
@@ -139,7 +139,7 @@ sequenceDiagram
 #### Phase 2: Sandbox Isolation & Git Tooling (May 24)
 - **Task 2.1:** Configure Docker containers for runtime execution, lock file permissions to enforce agent boundaries.  
 - **Task 2.2:** Implement file‑system API bindings for the Developer, and command‑terminal interceptors for the QA Agent.  
-- *Milestone:* DA builds a minimal Factorio Modeler skeleton inside a container; SMA auto‑creates GitHub issues with proper links.
+- *Milestone:* DA builds a minimal Factorio Modeler skeleton inside a container; SMA auto‑creates issues.
 
 #### Phase 3: State‑Machine Loop & Feedback Routing (May 28)
 - **Task 3.1:** Code state‑conditional logic for automatic feedback loops: QA failures → SMA reassignment → DA bug‑fix with retry limit.  
@@ -164,7 +164,7 @@ Workload evenly split between two members, each focusing on distinct technical l
 
 **Hannes Zelger – Sandboxing, Tooling & Target Application**
 - Docker sandbox construction with strict file‑permission isolation.
-- Git/Commit automation (Conventional Commits, GitHub issue bot).
+- Git/Commit automation (Conventional Commits).
 - Core Factorio Modeler application (domain logic, MCP server, tool definitions).
 - QA test harness (execution, structured error reporting) and MCP integration tests.
 
