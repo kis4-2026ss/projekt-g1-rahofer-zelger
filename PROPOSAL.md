@@ -1,11 +1,6 @@
 # Project Proposal: MAGE-Scrum
 ## Multi-Agent Generative Ecosystem for Automated Scrum-Driven Software Development
 
-**Proposal Submission:** 29 May 2026  
-**Project Duration:** 8 weeks (starting upon approval)
-
----
-
 ### 1. Goal of the Project
 
 #### 1.1 High-Level Goal & Validation Strategy
