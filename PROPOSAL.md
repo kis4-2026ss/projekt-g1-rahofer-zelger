@@ -13,7 +13,7 @@ Develop and evaluate an autonomous, role‑bounded Multi‑Agent System (MAS) th
    - Automated GitHub issues, strict **Conventional Commits**, auto‑generated Markdown docs.  
    - **Zero boundary violations** – log analysis must confirm no agent performs out‑of‑role actions (e.g., Scrum Master never writes code).
 2. **Functional Compliance**  
-   - 100% mathematical accuracy for canonical Factorio production chains (green circuits, oil processing).  
+   - 100% mathematical accuracy for canonical Factorio production chains (10 itesms/min advanced circuit and a seperate 2,5 items/m express splitter layout).  
    - ≥90% automated test coverage generated independently by the QA Agent.
 3. **MCP Usability**  
    - MCP server tools: `add_production_node`, `connect_nodes`, `calculate_throughput`, `validate_layout`.  
@@ -33,8 +33,8 @@ Develop and evaluate an autonomous, role‑bounded Multi‑Agent System (MAS) th
 | :--- | :--- | :--- |
 | Requirement Elicitation | POA | Chat interface, Gherkin processor, Markdown writer |
 | Sprint Planning & Tasking | SMA | LangGraph state machine, GitHub Issues API, JSON backlog |
-| Code Implementation | DA | Docker sandbox (Python/C#), Git CLI, Conventional Commits hooks |
-| Validation & Testing | QATA | Docker sandbox, Pytest, output diff interceptor |
+| Code Implementation | DA | Python/C#, Git CLI, Conventional Commits hooks |
+| Validation & Testing | QATA | Pytest, output diff interceptor |
 | MCP Server Implementation | DA | MCP SDK, integration test sandbox |
 | MCP Validation | External LLM + QATA | MCP client, tool‑calling scripts, assertion framework |
 | Human Review | Human + POA | Web‑based dialogue dashboard, acceptance log |
