@@ -131,23 +131,21 @@ sequenceDiagram
 
 ### 3. Project Plan and Milestones
 
-**8‑week timeline** (post‑approval):
-
-#### Phase 1: Agent Architecture & Core Prompting
+#### Phase 1: Agent Architecture & Core Prompting (May 22)
 - **Task 1.1:** Build LangGraph multi‑agent backbone, global state trackers, and messaging topology.  
 - **Task 1.2:** Develop system prompts with strict negative constraints (e.g., SMA declines code, DA cannot change scope).  
 - *Milestone:* Agents exchange pre‑scripted messages without role violations; POA outputs correct Gherkin for 3+ Factorio features.
 
-#### Phase 2: Sandbox Isolation & Git Tooling
+#### Phase 2: Sandbox Isolation & Git Tooling (May 24)
 - **Task 2.1:** Configure Docker containers for runtime execution, lock file permissions to enforce agent boundaries.  
 - **Task 2.2:** Implement file‑system API bindings for the Developer, and command‑terminal interceptors for the QA Agent.  
 - *Milestone:* DA builds a minimal Factorio Modeler skeleton inside a container; SMA auto‑creates GitHub issues with proper links.
 
-#### Phase 3: State‑Machine Loop & Feedback Routing
+#### Phase 3: State‑Machine Loop & Feedback Routing (May 28)
 - **Task 3.1:** Code state‑conditional logic for automatic feedback loops: QA failures → SMA reassignment → DA bug‑fix with retry limit.  
 - *Milestone:* Complete autonomous sprint cycle for “green circuits” including at least one automated bug‑fix iteration without human intervention.
 
-#### Phase 4: Evaluation, Audit & Finalization
+#### Phase 4: Evaluation, Audit & Finalization (May 29)
 - **Task 4.1:** Full‑lifecycle stress test: agents autonomously build a full‑stack Factorio Modeler with MCP interface.  
 - **Task 4.2:** Run automated verification tools to audit role‑isolation compliance, clean artifacts, and write the final evaluation report.  
 - *Milestone:* Zero role boundary violations; MCP‑driven external planner successfully designs an 10 itesms/min advanced circuit and a seperate 2,5 items/m express splitter layout; ≥90% test coverage.
