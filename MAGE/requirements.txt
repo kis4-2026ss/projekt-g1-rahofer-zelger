@@ -1,6 +1,8 @@
 crewai
 crewai-tools
 langgraph
+langchain_experimental
+langchain_community
 langchain-openai
 docker
 python-dotenv
