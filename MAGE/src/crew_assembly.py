@@ -172,7 +172,11 @@ qa_tester = Agent(
     allow_delegation=False,
     system_template="""{system_message}
     1. Write C# test projects based on Gherkin specs.
-    2. Include 'QA_PASSED' only if all mathematical assertions pass perfectly."""
+    2. You MUST use the `dotnet_tool` to run the tests. Do not guess the results.
+    3. Your final output MUST be a valid JSON block containing exactly these two keys:
+       - "tests_executed": boolean (true if you actually ran dotnet test, false otherwise)
+       - "all_passed": boolean (true ONLY if the dotnet tool reported 0 failures)
+    Do not include any text after the JSON block."""
 )
 
 
@@ -272,7 +276,18 @@ def qa_tester_node(state: ScrumState) -> Dict:
     prompt = f"Test the implementation in {SRC_PATH} against specs: {specs}."
     output = execute_with_telemetry(qa_tester, prompt)
 
-    passed = "QA_PASSED" in output.upper()
+    passed = False
+
+    # Try to extract JSON from the output using regex
+    json_match = re.search(r'\{.*\}', output.replace('\n', ''))
+    if json_match:
+        try:
+            result_data = json.loads(json_match.group(0))
+            # Only pass if tests were actually executed AND they all passed
+            passed = result_data.get("tests_executed", False) and result_data.get("all_passed", False)
+        except json.JSONDecodeError:
+            passed = False
+            output += "\n[SYSTEM: Failed to parse QA output as JSON.]"
 
     qa_results = {
         "passed": passed,
