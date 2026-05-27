@@ -19,7 +19,7 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 load_dotenv(PROJECT_ROOT / ".env")
 
 # Global Iteration Limit for QA -> Developer loop
-MAX_QA_DEV_ITERATIONS = 20
+MAX_QA_DEV_ITERATIONS = 2000
 
 # Resolve workspace paths from environment or defaults
 raw_issues_path = os.getenv("AGENT_ISSUES_PATH", "./agent_workspace/issues")
