@@ -65,21 +65,39 @@ base_shell = ShellTool()
 
 class GitTool(BaseTool):
     name: str = "git_tool"
-    description: str = "Manage repository history. Usage: git_tool._run('commit -m \"feat: msg\"')"
+    description: str = (
+        "Manage repository history. "
+        "Provide raw Git subcommands without the leading 'git'. "
+        "Usage: git_tool._run('commit -m \"feat: msg\"') or 'add . && commit -m \"...\"'"
+    )
 
     def _run(self, command: str) -> str:
         if any(forbidden in command for forbidden in ["push", "pull", "remote"]):
             return "Error: Remote operations are disabled for security."
+
+        if command.lstrip().startswith("git "):
+            command = command.lstrip()[4:].lstrip()
+
         return base_shell.run(f"git -C {SRC_PATH} {command}")
 
 
 class DotNetTool(BaseTool):
     name: str = "dotnet_tool"
-    description: str = "C# lifecycle management (build, test, run). Usage: dotnet_tool._run('build')"
+    description: str = "C# lifecycle management (build, test, run). Provide raw dotnet subcommands (e.g., 'build', 'run', 'test'). Do NOT include 'dotnet' prefix unless necessary."
 
     def _run(self, command: str) -> str:
-        full_cmd = f"dotnet {command}" if not command.startswith("dotnet") else command
-        return base_shell.run(f"cd {SRC_PATH} && {full_cmd}")
+        command = command.strip()
+        if not command:
+            return "Error: Empty command"
+
+        # Optional: block dangerous commands
+        dangerous = ["nuget delete", "workload install", "tool install --global"]
+        if any(d in command for d in dangerous):
+            return "Error: Dangerous dotnet operations are disabled."
+
+        full_cmd = command if command.startswith("dotnet") else f"dotnet {command}"
+        # Use cwd parameter instead of cd && for reliability
+        return base_shell.run(full_cmd, cwd=SRC_PATH)   # if base_shell.run supports cwd
 
 
 git = GitTool()
