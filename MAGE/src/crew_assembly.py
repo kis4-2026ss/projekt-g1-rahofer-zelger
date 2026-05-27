@@ -14,9 +14,12 @@ from langchain_community.tools import ShellTool
 from langgraph.graph import StateGraph, END
 from crewai.tools import BaseTool
 
-# --- 1. Path & Environment Setup ---
+# --- 1. Path, Environment & Global Config Setup ---
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 load_dotenv(PROJECT_ROOT / ".env")
+
+# Global Iteration Limit for QA -> Developer loop
+MAX_QA_DEV_ITERATIONS = 20
 
 # Resolve workspace paths from environment or defaults
 raw_issues_path = os.getenv("AGENT_ISSUES_PATH", "./agent_workspace/issues")
@@ -101,11 +104,12 @@ dotnet = DotNetTool()
 file_tools = [FileReadTool(), FileWriterTool(), DirectoryReadTool()]
 
 
-# --- 4. State Definition (From old.py) ---
+# --- 4. State Definition (Updated with iteration counter) ---
 class ScrumState(TypedDict):
     next_node: str
     role_violation_flag: bool
     messages: Annotated[list, add]
+    qa_dev_iterations: int  # Tracking iterations for QA -> Dev loop
 
     # artifacts
     product_backlog: List[Dict[str, str]]
@@ -172,7 +176,7 @@ qa_tester = Agent(
 )
 
 
-# --- 6. Node Logic (Combined & Adapted from old.py routing) ---
+# --- 6. Node Logic (Updated with QA/Dev iteration limits) ---
 def execute_with_telemetry(agent, task_desc):
     start = time.time()
     task = Task(description=task_desc, agent=agent, expected_output="Defined artifact.")
@@ -263,6 +267,7 @@ def developer_node(state: ScrumState) -> Dict:
 
 def qa_tester_node(state: ScrumState) -> Dict:
     specs = state.get("current_increment", {}).get("specs", "")
+    iterations = state.get("qa_dev_iterations", 0)
 
     prompt = f"Test the implementation in {SRC_PATH} against specs: {specs}."
     output = execute_with_telemetry(qa_tester, prompt)
@@ -274,14 +279,28 @@ def qa_tester_node(state: ScrumState) -> Dict:
         "report": output
     }
 
+    if passed:
+        next_node = "end"
+        msg = "QA Result: Passed. Finishing process."
+    else:
+        # Check against global iteration limit
+        if iterations >= MAX_QA_DEV_ITERATIONS:
+            next_node = "end"
+            msg = f"QA Result: Failed - Max QA/Dev iterations ({MAX_QA_DEV_ITERATIONS}) reached. Halting process to avoid infinite loop."
+        else:
+            next_node = "developer"
+            msg = f"QA Result: Failed - Re-routing back to Developer (Iteration {iterations + 1}/{MAX_QA_DEV_ITERATIONS})."
+            iterations += 1
+
     return {
-        "messages": [f"QA Result: {'Passed' if passed else 'Failed - Re-routing back.'}"],
+        "messages": [msg],
         "qa_results": qa_results,
-        "next_node": "end" if passed else "developer"
+        "qa_dev_iterations": iterations,
+        "next_node": next_node
     }
 
 
-# --- 7. Graph Assembly (From old.py routing) ---
+# --- 7. Graph Assembly ---
 builder = StateGraph(ScrumState)
 builder.add_node("product_owner", product_owner_node)
 builder.add_node("scrum_master", scrum_master_node)
@@ -341,6 +360,7 @@ if __name__ == "__main__":
         ],
         "next_node": "product_owner",
         "role_violation_flag": False,
+        "qa_dev_iterations": 0, # Initialize the tracking variable
         "product_backlog": [],
         "sprint_backlog": [],
         "current_increment": {
