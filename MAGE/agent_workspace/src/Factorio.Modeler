@@ -1,0 +1,174 @@
+# Factorio.Modeler Core Library
+
+## 📋 Overview
+
+The Factorio.Modeler Core Library is the foundation of the Factorio Architect system. It provides:
+- Throughput calculation engine
+- Production chain simulation
+- Bottleneck detection algorithms
+- Canvas node management
+- Recipe and machine data models
+
+## 🏗️ Architecture
+
+```
+Factorio.Modeler/
+├── Interfaces/
+│   ├── IThroughputCalculator.cs
+│   ├── ISimulationEngine.cs
+│   ├── IBottleneckAnalyzer.cs
+│   └── INodeManager.cs
+├── Models/
+│   ├── Node.cs
+│   ├── Connection.cs
+│   ├── Recipe.cs
+│   ├── Machine.cs
+│   └── SimulationResult.cs
+├── Calculators/
+│   ├── ThroughputCalculator.cs
+│   └── AdvancedThroughputCalculator.cs
+├── Simulation/
+│   ├── SimulationEngine.cs
+│   └── BottleneckAnalyzer.cs
+└── Services/
+    ├── DataPersistenceService.cs
+    └── CircuitNetworkAnalyzer.cs
+```
+
+## 🧮 Throughput Calculator
+
+### Implementation Details
+
+The `ThroughputCalculator` implements the base formula:
+```
+Throughput = (Output_Per_Cycle / Crafting_Time) × Machine_Speed_Multiplier
+```
+
+### Key Methods
+
+| Method | Description | Returns |
+|--------|-------------|---------|
+| `CalculateThroughput(Recipe, Machine)` | Calculate throughput for a recipe-machining combo | double |
+| `ValidateRecipeChain(list<Recipe>)` | Validate production chain feasibility | ValidationResult |
+| `GetBottlenecks(node_ids)` | Identify bottlenecks in node list | List<BottleneckInfo> |
+
+### Validation Logic
+
+All calculations are validated against:
+- ✓ Crafting time constraints
+- ✓ Machine capacity limits
+- ✓ Circuit network throughput
+- ✓ Belt transport constraints
+
+## 🔍 Bottleneck Detection
+
+### Algorithm Overview
+
+The `BottleneckAnalyzer` uses:
+1. Input-output rate comparison
+2. Circuit network analysis
+3. Belt capacity calculations
+4. Queue build-up detection
+
+```
+bottleneck_score = sum(input_rates - output_rates) for all nodes in chain
+if bottleneck_score > threshold:
+    report_bottleneck(node, score, recommendations)
+```
+
+## 🗂️ Data Models
+
+### Node Model
+```csharp
+public class Node {
+    public string Id { get; set; }
+    public NodeType Type { get; set; }
+    public Position Position { get; set; }
+    public List<Connection> Connections { get; set; }
+    public ThroughputStats Throughput { get; set; }
+}
+```
+
+### Connection Model
+```csharp
+public class Connection {
+    public string SourceNodeId { get; set; }
+    public string TargetNodeId { get; set; }
+    public int ItemsPerTick { get; set; }
+    public string Type { get; set; } // belt, pipe, circuit
+}
+```
+
+## 🧪 Testing
+
+### Gherkin Scenarios
+
+#### Basic Throughput Calculation
+```gherkin
+Feature: Basic throughput calculation
+
+  Scenario: Calculate circuit throughput
+    Given a recipe for advanced circuit
+    And a machine with 0.25 seconds crafting time
+    When calculating throughput
+    Then throughput should be 10 per minute
+
+  Scenario: Validate production chain
+    Given recipes for items A, B, and C
+    And A uses 2 B items
+    And B uses 1 C item
+    When simulating the chain
+    Then validation should pass
+
+```
+
+## 📖 Usage Example
+
+```csharp
+// Initialize the calculator
+var calculator = new ThroughputCalculator(recipeRepository, machineRegistry);
+
+// Calculate throughput
+var recipe = await recipeRepository.GetById("circuit");
+var machine = await machineRepository.GetById("advanced-circuit-provider");
+var throughput = calculator.Calculate(recipe, machine); // Returns: 10/min
+
+// Analyze bottlenecks
+var bottlenecks = calculator.GetBottlenecks(new[] { node1, node2, node3 });
+foreach (var bottleneck in bottlenecks) {
+    logger.LogWarning($"Bottleneck at {bottleneck.Node}: {bottleneck.Score} items/sec");
+}
+```
+
+## 🔧 Dependency Injection
+
+```xml
+<PackageReference Include="Microsoft.Extensions.DependencyInjection" Version="8.*" />
+<PackageReference Include="Microsoft.Extensions.Configuration.Binder" Version="8.*" />
+```
+
+## 📚 API Reference
+
+### ThroughputCalculator
+
+| Method | Description |
+|--------|-------------|
+| `CalculateThroughput()` | Core throughput calculation |
+| `ValidateChain()` | Production chain validation |
+| `GetBottlenecks()` | Bottleneck detection |
+| `Simulate()` | Full simulation run |
+
+## 📝 Change Log
+
+- **v1.0.0** - Initial release
+  - Core throughput engine
+  - Basic validation logic
+  - JSON data persistence
+
+## 🤝 Contributing
+
+See main repository README.md for contribution guidelines.
+
+---
+**Maintained by**: Development Team
+**Library Version**: 1.0.0
