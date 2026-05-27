@@ -52,14 +52,12 @@ class MetricsTracker:
     def update(self, result_obj: Any, duration: float):
         self.total_time += duration
         self.calls += 1
-        # Extract usage if provided by the LLM response
         usage = getattr(result_obj, 'token_usage', None)
         if usage:
             self.total_tokens += usage.total_tokens
 
 
 metrics = MetricsTracker()
-
 base_shell = ShellTool()
 
 
@@ -90,14 +88,12 @@ class DotNetTool(BaseTool):
         if not command:
             return "Error: Empty command"
 
-        # Optional: block dangerous commands
         dangerous = ["nuget delete", "workload install", "tool install --global"]
         if any(d in command for d in dangerous):
             return "Error: Dangerous dotnet operations are disabled."
 
         full_cmd = command if command.startswith("dotnet") else f"dotnet {command}"
-        # Use cwd parameter instead of cd && for reliability
-        return base_shell.run(full_cmd, cwd=SRC_PATH)   # if base_shell.run supports cwd
+        return base_shell.run(full_cmd, cwd=SRC_PATH)
 
 
 git = GitTool()
@@ -105,16 +101,20 @@ dotnet = DotNetTool()
 file_tools = [FileReadTool(), FileWriterTool(), DirectoryReadTool()]
 
 
-# --- 4. State Definition ---
-
+# --- 4. State Definition (From old.py) ---
 class ScrumState(TypedDict):
     next_node: str
+    role_violation_flag: bool
     messages: Annotated[list, add]
+
+    # artifacts
+    product_backlog: List[Dict[str, str]]
+    sprint_backlog: List[Dict[str, str]]
     current_increment: Dict[str, str]
+    qa_results: Dict[str, Any]
 
 
-# --- 5. Agent Definitions (Strict Project Focus) ---
-
+# --- 5. Agent Definitions (Strict Project Focus from crew_assembly.py) ---
 product_owner = Agent(
     role="Product Owner",
     goal="Define Factorio Modeler requirements and vision using internal recipe knowledge.",
@@ -155,7 +155,7 @@ developer = Agent(
     1. Write C# (.NET 8.0) and Avalonia XAML only.
     2. MANDATORY: Every subsystem folder needs its own README.md.
     3. Use DirectoryReadTool before every modification to maintain context.
-    4. Implement math: $T = \frac{\text{Recipe Output}}{\text{Crafting Time}} \times \text{Machine Speed}$."""
+    4. Implement math: T = (Recipe Output / Crafting Time) * Machine Speed."""
 )
 
 qa_tester = Agent(
@@ -172,8 +172,7 @@ qa_tester = Agent(
 )
 
 
-# --- 6. Node Logic ---
-
+# --- 6. Node Logic (Combined & Adapted from old.py routing) ---
 def execute_with_telemetry(agent, task_desc):
     start = time.time()
     task = Task(description=task_desc, agent=agent, expected_output="Defined artifact.")
@@ -184,38 +183,105 @@ def execute_with_telemetry(agent, task_desc):
 
 
 def product_owner_node(state: ScrumState) -> Dict:
-    prompt = f"Analyze requirements. Update Gherkin specs and Root README in {ISSUES_PATH} for: {state['messages'][-1]}"
+    latest_input = state["messages"][-1] if state["messages"] else ""
+    prompt = f"Analyze input: {latest_input}. Update Gherkin specs and Root README in {ISSUES_PATH}."
+
     output = execute_with_telemetry(product_owner, prompt)
-    return {"messages": [f"POA: {output}"], "current_increment": {"specs": output}, "next_node": "scrum_master"}
+
+    # Initialize current_increment if empty to prevent KeyError downstream
+    current_inc = state.get("current_increment", {})
+    current_inc["specs"] = output
+
+    return {
+        "messages": [f"POA: {output}"],
+        "current_increment": current_inc,
+        "next_node": "scrum_master"
+    }
 
 
 def scrum_master_node(state: ScrumState) -> Dict:
-    specs = state["current_increment"].get("specs", "")
-    code = state["current_increment"].get("code", "")
-    prompt = f"Audit: Specs={specs}, Code={code}. Verify READMEs and check for role violations."
-    res = execute_with_telemetry(scrum_master, prompt)
+    latest_specs = state.get("current_increment", {}).get("specs", "")
+    latest_code = state.get("current_increment", {}).get("code", "")
+
+    if latest_specs and not latest_code:
+        audit_context = f"""
+            Audit Specs: {latest_specs}. 
+            Verify READMEs and check for role violations. If valid, reply exactly with 'PROCEED'.
+        """
+        next_destination = "developer"
+        fallback_destination = "product_owner"
+    else:
+        audit_context = f"""
+            Audit Code against Specs. 
+            SPECS: {latest_specs}
+            CODE: {latest_code}
+            Check for role violations and missing commits. If valid, reply exactly with 'PROCEED'.
+        """
+        next_destination = "qa_tester"
+        fallback_destination = "developer"
+
+    res = execute_with_telemetry(scrum_master, audit_context)
 
     if "PROCEED" in res.upper():
-        return {"messages": ["SMA: Phase Approved."], "next_node": "developer" if not code else "qa_tester"}
-    return {"messages": [f"SMA: Rejected - {res}"], "next_node": "product_owner" if not code else "developer"}
+        return {
+            "messages": ["SMA: Phase Approved."],
+            "next_node": next_destination,
+            "role_violation_flag": False
+        }
+    else:
+        return {
+            "messages": [f"SMA: Rejected - {res}"],
+            "next_node": fallback_destination,
+            "role_violation_flag": True
+        }
 
 
 def developer_node(state: ScrumState) -> Dict:
-    prompt = f"Review {SRC_PATH}. Implement: {state['current_increment']['specs']}. Update Subsystem READMEs and Commit via Git."
+    specs = state.get("current_increment", {}).get("specs", "")
+    latest_message = state["messages"][-1] if state["messages"] else ""
+    qa_report = state.get("qa_results", {}).get("report", "")
+
+    # Inject context from previous node failures
+    feedback_context = ""
+    if state.get("role_violation_flag"):
+        feedback_context = f"\nYOUR PREVIOUS CODE WAS REJECTED BY THE SCRUM MASTER. Fix it based on this feedback:\n{latest_message}"
+    elif state.get("qa_results", {}).get("passed") is False:
+        feedback_context = f"\nYOUR PREVIOUS CODE FAILED QA TESTING. Fix the bugs detailed in this report:\n{qa_report}"
+
+    prompt = f"Review {SRC_PATH}. Implement specs: {specs}. \n{feedback_context}\nUpdate Subsystem READMEs and Commit via Git."
     output = execute_with_telemetry(developer, prompt)
-    return {"messages": ["DA: Work complete."], "current_increment": {**state["current_increment"], "code": output},
-            "next_node": "scrum_master"}
+
+    current_inc = state.get("current_increment", {})
+    current_inc["code"] = output
+
+    return {
+        "messages": ["DA: Work complete."],
+        "current_increment": current_inc,
+        "next_node": "scrum_master"
+    }
 
 
 def qa_tester_node(state: ScrumState) -> Dict:
-    prompt = f"Test the implementation in {SRC_PATH} against specs: {state['current_increment']['specs']}."
+    specs = state.get("current_increment", {}).get("specs", "")
+
+    prompt = f"Test the implementation in {SRC_PATH} against specs: {specs}."
     output = execute_with_telemetry(qa_tester, prompt)
+
     passed = "QA_PASSED" in output.upper()
-    return {"messages": [f"QA Result: {output}"], "next_node": "end" if passed else "developer"}
+
+    qa_results = {
+        "passed": passed,
+        "report": output
+    }
+
+    return {
+        "messages": [f"QA Result: {'Passed' if passed else 'Failed - Re-routing back.'}"],
+        "qa_results": qa_results,
+        "next_node": "end" if passed else "developer"
+    }
 
 
-# --- 7. Graph Assembly ---
-
+# --- 7. Graph Assembly (From old.py routing) ---
 builder = StateGraph(ScrumState)
 builder.add_node("product_owner", product_owner_node)
 builder.add_node("scrum_master", scrum_master_node)
@@ -225,20 +291,24 @@ builder.add_node("qa_tester", qa_tester_node)
 builder.set_entry_point("product_owner")
 
 
-def router(state: ScrumState): return state.get("next_node", "end")
+def routing_router(state: ScrumState) -> str:
+    return state.get("next_node", "end")
 
 
-builder.add_conditional_edges("product_owner", router, {"scrum_master": "scrum_master", "end": END})
-builder.add_conditional_edges("scrum_master", router,
-                              {"developer": "developer", "qa_tester": "qa_tester", "product_owner": "product_owner",
-                               "end": END})
-builder.add_conditional_edges("developer", router, {"scrum_master": "scrum_master", "end": END})
-builder.add_conditional_edges("qa_tester", router, {"developer": "developer", "end": END})
+builder.add_conditional_edges("product_owner", routing_router, {"scrum_master": "scrum_master", "end": END})
+builder.add_conditional_edges("scrum_master", routing_router, {
+    "developer": "developer",
+    "qa_tester": "qa_tester",
+    "product_owner": "product_owner",
+    "end": END
+})
+builder.add_conditional_edges("developer", routing_router, {"scrum_master": "scrum_master", "end": END})
+builder.add_conditional_edges("qa_tester", routing_router,
+                              {"developer": "developer", "scrum_master": "scrum_master", "end": END})
 
 scrum_app = builder.compile()
 
 # --- 8. Main Loop ---
-
 if __name__ == "__main__":
     initial_state = {
         "messages": [
@@ -248,21 +318,16 @@ if __name__ == "__main__":
             **Objective:** Deliver a complete, version-controlled C# Avalonia application that models Factorio production chains via a graphical UI and an integrated MCP server.
 
             **1. Core Simulation & Data Logic**
-            - **Data Source:** Use a local file `factorio_recipes_and_machines.json` (to be defined by the PO/Dev) as the single source of truth for recipes and machine tiers.
-            - **Throughput Engine:** Implement the math for production logic using the formula:
-              $$Throughput = \\frac{Output}{CraftingTime} \\times MachineSpeed$$
-            - **Targets:** Specifically support modeling 'Advanced Circuit' (10/min) and 'Express Splitter' (2.5/min) production chains as the first test cases.
+            - **Data Source:** Use a local file `factorio_recipes_and_machines.json` (to be defined by the PO/Dev) as the single source of truth.
+            - **Throughput Engine:** Implement the math for production logic: T = (Output/CraftingTime) * MachineSpeed.
+            - **Targets:** Specifically support modeling 'Advanced Circuit' (10/min) and 'Express Splitter' (2.5/min).
 
             **2. Graphical Interface (Avalonia UI)**
             - **Scaffolding:** The project must be initialized using standard `Avalonia.Templates`.
-            - **Visuals:** Implement a node-based canvas. Nodes must use standard emojis (🏭, ⚙️, 🟦) and show real-time throughput on Input/Output ports.
-            - **Interactivity:** Support connectivity between nodes representing product flow.
+            - **Visuals:** Implement a node-based canvas with emojis (🏭, ⚙️, 🟦) and throughput display.
 
             **3. MCP Server Integration**
-            - Provide an MCP interface allowing external LLMs to interact with the model via tools:
-              - `add_node(string machineType, string recipe)`
-              - `connect_nodes(string sourceId, string targetId)`
-              - `get_bottlenecks()`: Identifies starved or over-producing nodes.
+            - Provide tools: `add_node`, `connect_nodes`, `get_bottlenecks()`.
 
             **4. Workflow & Initialization Mandates**
             - **Clean Start:** The project must begin with a `git init` in the source directory to establish a baseline.
@@ -270,23 +335,19 @@ if __name__ == "__main__":
             - **Context Awareness:** Agents MUST use the `DirectoryReadTool` at the start of every task to check existing files. Do not overwrite logic without understanding the existing codebase first.
 
             **5. Definition of Done (Documentation)**
-            - **Root README.md:** The Product Owner must maintain this in the issues folder, describing the system vision and throughput math.
-            - **Technical READMEs:** The Developer must provide a README.md in every C# project/subsystem folder explaining the implementation and class structure.
-            - **QA:** 'QA_PASSED' is only achieved if the simulation math is verified and the documentation suite is complete.
-
-            **Constraint:** Do not wait for user instructions. Use your tools and the Scrum framework to self-initialize, build, test, and document the entire system.
+            - **Root README.md:** Kept by PO.
+            - **Technical READMEs:** Kept by Dev in every subsystem folder.
             """
         ],
+        "next_node": "product_owner",
+        "role_violation_flag": False,
+        "product_backlog": [],
+        "sprint_backlog": [],
         "current_increment": {
             "specs": "",
             "code": ""
         },
-        "metrics_summary": {
-            "total_tokens": 0,
-            "total_time": 0.0,
-            "calls": 0
-        },
-        "next_node": "product_owner"
+        "qa_results": {}
     }
 
     print("--- MAGE-SCRUM RUNTIME STARTED (OFFLINE MODE) ---")
