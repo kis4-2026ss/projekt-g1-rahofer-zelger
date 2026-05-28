@@ -1,7 +1,5 @@
 FROM python:3.11-slim
 
-FROM python:3.11-slim
-
 # 1. Install System Dependencies & .NET SDK Dependencies
 RUN apt-get update && apt-get install -y \
     curl \

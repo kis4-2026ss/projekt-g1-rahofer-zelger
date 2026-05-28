@@ -39,7 +39,7 @@ Path(SRC_PATH).mkdir(parents=True, exist_ok=True)
 
 # --- 2. LLM Configuration (using stable Qwen model) ---
 llm_config = LLM(
-    model="ollama/qwen2.5-coder:7b-instruct",   # more reliable than omnicoder-agent
+    model="ollama/qwen2.5-coder:7b-instruct",
     base_url="http://localhost:11434",
     timeout=600,
     extra_body={
@@ -54,7 +54,14 @@ llm_config = LLM(
 # --- 3. Custom Tools ---
 def _resolve_workspace_path(input_path: str) -> Path:
     """Resolve a user supplied path and ensure it stays inside agent_workspace."""
-    candidate = Path(input_path)
+    # Normalize: remove leading '/app/agent_workspace/' or 'app/agent_workspace/'
+    normalized = input_path.lstrip('/')
+    if normalized.startswith('app/agent_workspace/'):
+        normalized = normalized[len('app/agent_workspace/'):]
+    elif normalized.startswith('agent_workspace/'):
+        normalized = normalized[len('agent_workspace/'):]
+
+    candidate = Path(normalized)
     if candidate.is_absolute():
         full_path = candidate.resolve()
     else:
@@ -66,7 +73,6 @@ def _resolve_workspace_path(input_path: str) -> Path:
         raise ValueError(f"path outside agent_workspace: {input_path}") from exc
 
     return full_path
-
 
 def _run_command(args: List[str], cwd: Path, timeout: int = 120) -> str:
     try:
@@ -680,5 +686,4 @@ if __name__ == "__main__":
         "qa_results": {}
     }
 
-    # Run direct sync without wrapping it in an explicit asyncio context block
     main_loop(initial_setup)
