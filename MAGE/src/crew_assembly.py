@@ -1,7 +1,10 @@
 import os
 import time
 import json
+import re
 from pathlib import Path
+
+from crewai.agents import AgentAction
 from dotenv import load_dotenv
 from typing import Dict, List, Annotated, Any
 from operator import add
@@ -9,7 +12,9 @@ from typing_extensions import TypedDict
 
 # CrewAI & LangGraph Imports
 from crewai import Agent, Task, LLM
-from crewai_tools import FileReadTool, FileWriterTool, DirectoryReadTool
+from crewai_tools import FileReadTool
+from crewai.agents.parser import AgentAction, AgentFinish
+from crewai.tools import tool
 from langchain_community.tools import ShellTool
 from langgraph.graph import StateGraph, END
 from crewai.tools import BaseTool
@@ -19,7 +24,7 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 load_dotenv(PROJECT_ROOT / ".env")
 
 # Global Iteration Limit for QA -> Developer loop
-MAX_QA_DEV_ITERATIONS = 2000
+MAX_QA_DEV_ITERATIONS = 500000
 
 # Resolve workspace paths from environment or defaults
 raw_issues_path = os.getenv("AGENT_ISSUES_PATH", "./agent_workspace/issues")
@@ -27,6 +32,7 @@ ISSUES_PATH = str((PROJECT_ROOT / raw_issues_path).resolve())
 
 raw_src_path = os.getenv("AGENT_SRC_PATH", "./agent_workspace/src")
 SRC_PATH = str((PROJECT_ROOT / raw_src_path).resolve())
+ALLOWED_BASE = (PROJECT_ROOT / "agent_workspace").resolve()
 
 # Environment settings for tool safety
 os.environ["CREWAI_TOOLS_ALLOW_UNSAFE_PATHS"] = "true"
@@ -35,32 +41,20 @@ os.environ["CREWAI_TOOLS_ALLOW_UNSAFE_PATHS"] = "true"
 Path(ISSUES_PATH).mkdir(parents=True, exist_ok=True)
 Path(SRC_PATH).mkdir(parents=True, exist_ok=True)
 
-# --- 2. LLM Configuration ---
+# --- 2. LLM Configuration (Optimized for Local Ollama Stability) ---
 llm_config = LLM(
-    model="ollama/qwen3.5-opencode:latest",
+    model="ollama/qwen3.5-crew:latest",
     base_url="http://localhost:11434",
-    api_key="NA"
+    extra_body={
+        "options": {
+            "num_ctx": 16384,
+            "num_predict": 4096,
+            "stop": ["Observation:", "<|im_end|>", "###"]
+        }
+    }
 )
 
-
-# --- 3. Custom Tools & Metrics Logic ---
-class MetricsTracker:
-    """Aggregates performance data across the graph run."""
-
-    def __init__(self):
-        self.total_tokens = 0
-        self.total_time = 0.0
-        self.calls = 0
-
-    def update(self, result_obj: Any, duration: float):
-        self.total_time += duration
-        self.calls += 1
-        usage = getattr(result_obj, 'token_usage', None)
-        if usage:
-            self.total_tokens += usage.total_tokens
-
-
-metrics = MetricsTracker()
+# --- 3. Custom Tools ---
 base_shell = ShellTool()
 
 
@@ -99,17 +93,89 @@ class DotNetTool(BaseTool):
         return base_shell.run(full_cmd, cwd=SRC_PATH)
 
 
-git = GitTool()
-dotnet = DotNetTool()
-file_tools = [FileReadTool(), FileWriterTool(), DirectoryReadTool()]
+class SafeFileReadTool(FileReadTool):
+    def _run(self, file_path: str, **kwargs) -> str:
+        full_path = (ALLOWED_BASE / file_path).resolve()
+        if not str(full_path).startswith(str(ALLOWED_BASE)):
+            return f"Error: Access denied – path outside agent_workspace: {file_path}"
+        if not full_path.exists():
+            return f"Error: File not found: {file_path}"
+        return super()._run(str(full_path), **kwargs)
 
 
-# --- 4. State Definition (Updated with iteration counter) ---
+@tool("SafeFileWriter")
+def safe_file_writer(file_path: str, content: str) -> str:
+    """Writes content to a file, but only if the path is within agent_workspace."""
+    full_path = (ALLOWED_BASE / file_path).resolve()
+    if not str(full_path).startswith(str(ALLOWED_BASE)):
+        return f"Error: Access denied – cannot write outside agent_workspace: {file_path}"
+    full_path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        with open(full_path, 'w', encoding='utf-8') as f:
+            f.write(content)
+        return f"Successfully wrote to {full_path}"
+    except Exception as e:
+        return f"Error writing file: {e}"
+
+
+@tool("SafeFileRead")
+def safe_file_read(file_path: str) -> str:
+    """Reads a file, but only if the path is within agent_workspace."""
+    full_path = (ALLOWED_BASE / file_path).resolve()
+    if not str(full_path).startswith(str(ALLOWED_BASE)):
+        return f"Error: Access denied – path outside agent_workspace: {file_path}"
+    if not full_path.exists():
+        return f"Error: File not found: {file_path}"
+    try:
+        with open(full_path, 'r', encoding='utf-8') as f:
+            return f.read()
+    except Exception as e:
+        return f"Error reading file: {e}"
+
+
+@tool("SafeDirectoryRead")
+def safe_directory_read(directory_path: str = ".") -> str:
+    """Lists directory contents, but only if the path is within agent_workspace."""
+    full_path = (ALLOWED_BASE / directory_path).resolve()
+    if not str(full_path).startswith(str(ALLOWED_BASE)):
+        return f"Error: Access denied – directory outside agent_workspace: {directory_path}"
+    if not full_path.is_dir():
+        return f"Error: Not a directory: {directory_path}"
+    try:
+        items = '\n'.join(str(p.relative_to(ALLOWED_BASE)) for p in full_path.iterdir())
+        return f"Contents of {directory_path}:\n{items}"
+    except Exception as e:
+        return f"Error reading directory: {e}"
+
+
+@tool("SafeFileRemove")
+def safe_file_remove(file_path: str) -> str:
+    """Deletes a file, but only if the path is within agent_workspace."""
+    full_path = (ALLOWED_BASE / file_path).resolve()
+    if not str(full_path).startswith(str(ALLOWED_BASE)):
+        return f"Error: Access denied – cannot delete outside agent_workspace: {file_path}"
+    if not full_path.exists():
+        return f"Error: File not found: {file_path}"
+    if full_path.is_dir():
+        return f"Error: Path is a directory, not a file: {file_path}"
+    try:
+        full_path.unlink()
+        return f"Successfully deleted: {full_path}"
+    except Exception as e:
+        return f"Error deleting file: {e}"
+
+
+git_tool = GitTool()
+dotnet_tool = DotNetTool()
+file_tools = [safe_file_read, safe_file_writer, safe_directory_read, safe_file_remove]
+
+
+# --- 4. State Definition ---
 class ScrumState(TypedDict):
     next_node: str
     role_violation_flag: bool
     messages: Annotated[list, add]
-    qa_dev_iterations: int  # Tracking iterations for QA -> Dev loop
+    qa_dev_iterations: int
 
     # artifacts
     product_backlog: List[Dict[str, str]]
@@ -118,7 +184,7 @@ class ScrumState(TypedDict):
     qa_results: Dict[str, Any]
 
 
-# --- 5. Agent Definitions (Strict Project Focus from crew_assembly.py) ---
+# --- 5. Agent Definitions ---
 product_owner = Agent(
     role="Product Owner",
     goal="Define Factorio Modeler requirements and vision using internal recipe knowledge.",
@@ -128,10 +194,11 @@ product_owner = Agent(
     verbose=True,
     allow_delegation=False,
     system_template="""{system_message}
-    1. Write ONLY Gherkin (Given/When/Then).
-    2. MANDATORY: Maintain Root README.md in {ISSUES_PATH}.
-    3. Ensure math for Advanced Circuits (10/min) matches standard Factorio ratios.
-    4. NO CODE. NO XAML."""
+    1. Before writing anything new, read all available issues and .md files to ensure atomicity.
+    2. Write ONLY Gherkin (Given/When/Then).
+    3. MANDATORY: Maintain Root README.md in {ISSUES_PATH}.
+    4. Ensure math for Advanced Circuits (10/min) matches standard Factorio ratios.
+    5. NO CODE. NO XAML."""
 )
 
 scrum_master = Agent(
@@ -139,7 +206,7 @@ scrum_master = Agent(
     goal="Audit role boundaries and ensure documentation completeness.",
     backstory="You are the process gatekeeper. You reject work that violates roles or lacks subsystem READMEs.",
     llm=llm_config,
-    tools=[git] + file_tools,
+    tools=[git_tool] + file_tools,
     verbose=True,
     allow_delegation=False,
     system_template="""{system_message}
@@ -152,14 +219,16 @@ developer = Agent(
     goal="Implement the C# Factorio Modeler and document technical architecture.",
     backstory=f"You implement logic in {SRC_PATH}. You document every subsystem with its own README.md. You never overwrite code without reading it first.",
     llm=llm_config,
-    tools=[git, dotnet] + file_tools,
+    tools=[git_tool, dotnet_tool] + file_tools,
     verbose=True,
     allow_delegation=False,
     system_template="""{system_message}
-    1. Write C# (.NET 8.0) and Avalonia XAML only.
+    1. Write C# (dotnet_tool is available with .NET 8.0) and Avalonia XAML only.
     2. MANDATORY: Every subsystem folder needs its own README.md.
-    3. Use DirectoryReadTool before every modification to maintain context.
-    4. Implement math: T = (Recipe Output / Crafting Time) * Machine Speed."""
+    3. Use safe_directory_read before every modification to maintain context.
+    4. Implement math: T = (Recipe Output / Crafting Time) * Machine Speed.
+    5. The factorio_recipes_and_machines.json is your single source of truth when it comes to ingame recipes and machines.
+    6. Commit after every feature, use the tools git_tool."""
 )
 
 qa_tester = Agent(
@@ -167,7 +236,7 @@ qa_tester = Agent(
     goal="Verify math accuracy and system integrity via xUnit tests.",
     backstory="You verify throughput accuracy and ensure documentation matches reality.",
     llm=llm_config,
-    tools=[dotnet] + file_tools,
+    tools=[dotnet_tool] + file_tools,
     verbose=True,
     allow_delegation=False,
     system_template="""{system_message}
@@ -175,28 +244,31 @@ qa_tester = Agent(
     2. You MUST use the `dotnet_tool` to run the tests. Do not guess the results.
     3. Your final output MUST be a valid JSON block containing exactly these two keys:
        - "tests_executed": boolean (true if you actually ran dotnet test, false otherwise)
-       - "all_passed": boolean (true ONLY if the dotnet tool reported 0 failures)
+       - "all_passed": boolean (true ONLY if the dotnet_tool reported 0 failures)
     Do not include any text after the JSON block."""
 )
 
 
-# --- 6. Node Logic (Updated with QA/Dev iteration limits) ---
-def execute_with_telemetry(agent, task_desc):
-    start = time.time()
-    task = Task(description=task_desc, agent=agent, expected_output="Defined artifact.")
-    res_obj = task.execute_sync()
-    duration = time.time() - start
-    metrics.update(res_obj, duration)
-    return str(res_obj)
+# --- 6. Node Logic ---
+def execute_with_retry(agent, task_desc, max_retries=10):
+    """Execute a task with retry on empty response."""
+    for attempt in range(max_retries):
+        task = Task(description=task_desc, agent=agent, expected_output="Defined artifact.")
+        res_obj = task.execute_sync()
+        result_str = str(res_obj)
+        if result_str and len(result_str.strip()) > 0:
+            return result_str
+        print(f"Empty response, retry {attempt + 1}/{max_retries}")
+        time.sleep(2)
+    return ""
 
 
 def product_owner_node(state: ScrumState) -> Dict:
     latest_input = state["messages"][-1] if state["messages"] else ""
     prompt = f"Analyze input: {latest_input}. Update Gherkin specs and Root README in {ISSUES_PATH}."
 
-    output = execute_with_telemetry(product_owner, prompt)
+    output = execute_with_retry(product_owner, prompt)
 
-    # Initialize current_increment if empty to prevent KeyError downstream
     current_inc = state.get("current_increment", {})
     current_inc["specs"] = output
 
@@ -228,7 +300,7 @@ def scrum_master_node(state: ScrumState) -> Dict:
         next_destination = "qa_tester"
         fallback_destination = "developer"
 
-    res = execute_with_telemetry(scrum_master, audit_context)
+    res = execute_with_retry(scrum_master, audit_context)
 
     if "PROCEED" in res.upper():
         return {
@@ -249,7 +321,6 @@ def developer_node(state: ScrumState) -> Dict:
     latest_message = state["messages"][-1] if state["messages"] else ""
     qa_report = state.get("qa_results", {}).get("report", "")
 
-    # Inject context from previous node failures
     feedback_context = ""
     if state.get("role_violation_flag"):
         feedback_context = f"\nYOUR PREVIOUS CODE WAS REJECTED BY THE SCRUM MASTER. Fix it based on this feedback:\n{latest_message}"
@@ -257,7 +328,7 @@ def developer_node(state: ScrumState) -> Dict:
         feedback_context = f"\nYOUR PREVIOUS CODE FAILED QA TESTING. Fix the bugs detailed in this report:\n{qa_report}"
 
     prompt = f"Review {SRC_PATH}. Implement specs: {specs}. \n{feedback_context}\nUpdate Subsystem READMEs and Commit via Git."
-    output = execute_with_telemetry(developer, prompt)
+    output = execute_with_retry(developer, prompt)
 
     current_inc = state.get("current_increment", {})
     current_inc["code"] = output
@@ -274,16 +345,13 @@ def qa_tester_node(state: ScrumState) -> Dict:
     iterations = state.get("qa_dev_iterations", 0)
 
     prompt = f"Test the implementation in {SRC_PATH} against specs: {specs}."
-    output = execute_with_telemetry(qa_tester, prompt)
+    output = execute_with_retry(qa_tester, prompt)
 
     passed = False
-
-    # Try to extract JSON from the output using regex
     json_match = re.search(r'\{.*\}', output.replace('\n', ''))
     if json_match:
         try:
             result_data = json.loads(json_match.group(0))
-            # Only pass if tests were actually executed AND they all passed
             passed = result_data.get("tests_executed", False) and result_data.get("all_passed", False)
         except json.JSONDecodeError:
             passed = False
@@ -298,10 +366,9 @@ def qa_tester_node(state: ScrumState) -> Dict:
         next_node = "end"
         msg = "QA Result: Passed. Finishing process."
     else:
-        # Check against global iteration limit
         if iterations >= MAX_QA_DEV_ITERATIONS:
             next_node = "end"
-            msg = f"QA Result: Failed - Max QA/Dev iterations ({MAX_QA_DEV_ITERATIONS}) reached. Halting process to avoid infinite loop."
+            msg = f"QA Result: Failed - Max QA/Dev iterations ({MAX_QA_DEV_ITERATIONS}) reached."
         else:
             next_node = "developer"
             msg = f"QA Result: Failed - Re-routing back to Developer (Iteration {iterations + 1}/{MAX_QA_DEV_ITERATIONS})."
@@ -342,40 +409,98 @@ builder.add_conditional_edges("qa_tester", routing_router,
 
 scrum_app = builder.compile()
 
-# --- 8. Main Loop ---
+
+# --- 8. Synchronous Execution Entrypoint ---
+def main_loop(initial_state):
+    print("--- MAGE-SCRUM RUNTIME STARTED (OFFLINE MODE) ---")
+    for event in scrum_app.stream(initial_state):
+        for node, update in event.items():
+            print(f"\n[NODE]: {node}")
+            if "messages" in update:
+                print(f"[LOG]: {update['messages'][-1]}")
+
+
 if __name__ == "__main__":
-    initial_state = {
+    initial_setup = {
         "messages": [
             """
-            ### FINAL PRODUCT TARGET: FACTORIO ARCHITECT (OFFLINE MODE)
+            ### SYSTEM INITIATION: FACTORIO ARCHITECT ENGINE
 
-            **Objective:** Deliver a complete, version-controlled C# Avalonia application that models Factorio production chains via a graphical UI and an integrated MCP server.
+            **CRITICAL ARCHITECTURAL REQUIREMENT:** 
+            You are building a production modeling tool. You must maintain structural division of labor.
+            - Product Owner: Output ONLY functional specifications, metrics, and Gherkin. No C# syntax.
+            - Developer: Output ONLY robust, compilable .NET 8 C# source logic, Avalonia XAML code, and markdown documentation. No loose conversational commentary.
+            - QA Tester: Execute automated xUnit tests using the dotnet_tool and return the structural metric JSON.
 
-            **1. Core Simulation & Data Logic**
-            - **Data Source:** Use a local file `factorio_recipes_and_machines.json` (to be defined by the PO/Dev) as the single source of truth.
-            - **Throughput Engine:** Implement the math for production logic: T = (Output/CraftingTime) * MachineSpeed.
-            - **Targets:** Specifically support modeling 'Advanced Circuit' (10/min) and 'Express Splitter' (2.5/min).
+            ---
 
-            **2. Graphical Interface (Avalonia UI)**
-            - **Scaffolding:** The project must be initialized using standard `Avalonia.Templates`.
-            - **Visuals:** Implement a node-based canvas with emojis (🏭, ⚙️, 🟦) and throughput display.
+            ### 1. CORE SIMULATION DATA & MECHANICS
+            - **Data Source File**: `/app/agent_workspace/src/factorio_recipes_and_machines.json`
+            - **Mathematical Model**: Production Throughput ($T$) per minute must be calculated strictly using the formula:
+              $$T = \\left( \\frac{\\text{Recipe Output Qty}}{\\text{Recipe Crafting Time}} \\right) \\times \\text{Machine Crafting Speed} \\times 60$$
+            - **Target Baseline Verification Tasks**:
+              1. *Advanced Circuit Production*: Verify a target assembly chain outputting exactly $10/\\text{min}$.
+              2. *Express Splitter Production*: Verify a target assembly chain outputting exactly $2.5/\\text{min}$.
 
-            **3. MCP Server Integration**
-            - Provide tools: `add_node`, `connect_nodes`, `get_bottlenecks()`.
+            ---
 
-            **4. Workflow & Initialization Mandates**
-            - **Clean Start:** The project must begin with a `git init` in the source directory to establish a baseline.
-            - **Versioning:** Use the `git_tool` for all changes with Conventional Commit messages (feat, fix, refactor).
-            - **Context Awareness:** Agents MUST use the `DirectoryReadTool` at the start of every task to check existing files. Do not overwrite logic without understanding the existing codebase first.
+            ### 2. CORE SUBSYSTEM COMPONENT REQUIREMENTS
+            - **Backend Engine Core**: Pure C# library managing recipe deserialization, graph nodes, structural relationships, factory lines, and throughput evaluation algorithms.
+            - **Graphical User Interface**: Cross-Platform desktop application leveraging `Avalonia.Templates` UI controls. Must include a workflow canvas displaying structural throughput metrics alongside item emojis (🏭, ⚙️, 🟦).
+            - **Model Context Protocol (MCP) Server**: Interoperable JSON-RPC API exposing exactly three technical capabilities:
+              - `add_node(string itemType, string machineType)`
+              - `connect_nodes(string sourceId, string targetId)`
+              - `get_bottlenecks()`
 
-            **5. Definition of Done (Documentation)**
-            - **Root README.md:** Kept by PO.
-            - **Technical READMEs:** Kept by Dev in every subsystem folder.
+            The entire C# should be accessible via a single .sln file.
+            ---
+
+            ### 3. AUTOMATION & INFRASTRUCTURE MANDATES
+            - **Version Control System**: Run initialization via `git init` directly inside the source directory. Every functional advancement or modification must map to an isolated git state change using standard Conventional Commit formatting (`feat:`, `fix:`, `docs:`, `refactor:`).
+            - **Context Isolation Policy**: The Developer must read targeted project workspaces using directory scanning tools prior to changing or creating code structures. Do not rewrite code blindly.
+            - **System Documentation Rules**: 
+              - The central `/app/agent_workspace/issues/README.md` belongs exclusively to the Product Owner.
+              - Every isolated technical C# project subdirectory must contain a dedicated, developer-maintained `README.md` file specifying internal architectures, module dependencies, and compilation guides.
+            
+            
+            ### 4. ACCEPTANCE TESTS (MUST BE VERIFIED BY QA TESTER)
+
+            The QA Tester MUST write and execute xUnit tests that validate the following four acceptance criteria.
+
+            #### Test 1: Advanced Circuit Throughput (10/min)
+            ```gherkin
+            Feature: Advanced Circuit Production Target
+              Scenario: Verify assembly chain outputs exactly 10 advanced circuits per minute
+                Given a production chain for advanced circuits using assembling machine 3 (crafting speed = 1.25)
+                And the recipe: output=1, crafting_time=6 seconds
+                When the total throughput is calculated using T = (output_qty / crafting_time) * machine_speed * 60
+                Then the throughput per minute equals exactly 10
+            ```
+            
+            #### Test 2: Express Splitter Throughput (2.5/min)
+            ```gherkin
+            Feature: Express Splitter Production Target
+              Scenario: Verify assembly chain outputs exactly 2.5 express splitters per minute
+                Given a production chain for express splitters using assembling machine 3 (crafting speed = 1.25)
+                And the recipe: output=1, crafting_time=2 seconds
+                When the total throughput is calculated using T = (output_qty / crafting_time) * machine_speed * 60
+                Then the throughput per minute equals exactly 2.5
+            ```
+            
+            #### Test 3: MCP Server Exposes Required Tools
+            ```gherkin
+            Feature: MCP Server Interface
+              Scenario: The MCP server must support three specific JSON-RPC methods
+                Given the MCP server is running on localhost:5000
+                When I send a request for `add_node` with parameters `itemType` and `machineType`
+                Then a valid JSON-RPC response with method name `add_node` is returned
+                And the same for `connect_nodes` (sourceId, targetId) and `get_bottlenecks` (no parameters)
+            ```
             """
         ],
         "next_node": "product_owner",
         "role_violation_flag": False,
-        "qa_dev_iterations": 0, # Initialize the tracking variable
+        "qa_dev_iterations": 0,
         "product_backlog": [],
         "sprint_backlog": [],
         "current_increment": {
@@ -385,13 +510,5 @@ if __name__ == "__main__":
         "qa_results": {}
     }
 
-    print("--- MAGE-SCRUM RUNTIME STARTED (OFFLINE MODE) ---")
-    for event in scrum_app.stream(initial_state):
-        for node, update in event.items():
-            print(f"\n[NODE]: {node}")
-            if "messages" in update:
-                print(f"[LOG]: {update['messages'][-1]}")
-
-            # Print Telemetry
-            print(
-                f"[METRICS] Total Tokens: {metrics.total_tokens} | Time: {metrics.total_time:.2f}s | Requests: {metrics.calls}")
+    # Run direct sync without wrapping it in an explicit asyncio context block
+    main_loop(initial_setup)

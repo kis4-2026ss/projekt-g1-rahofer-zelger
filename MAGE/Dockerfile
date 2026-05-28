@@ -14,14 +14,14 @@ RUN apt-get update && apt-get install -y \
     && rm -rf /var/lib/apt/lists/*
 
 # 2. Install .NET 8.0 SDK (Current Standard for Avalonia)
+# Install .NET 8 SDK
 RUN wget https://dot.net/v1/dotnet-install.sh -O dotnet-install.sh && \
     chmod +x dotnet-install.sh && \
-    ./dotnet-install.sh --channel 8.0 && \
+    ./dotnet-install.sh --channel 8.0 --install-dir /usr/share/dotnet && \
     rm dotnet-install.sh
 
-# 3. Add .NET to PATH
-ENV DOTNET_ROOT=/root/.dotnet
-ENV PATH=$PATH:$DOTNET_ROOT:$DOTNET_ROOT/tools
+ENV DOTNET_ROOT=/usr/share/dotnet
+ENV PATH=$PATH:/usr/share/dotnet
 
 WORKDIR /app
 
@@ -31,8 +31,4 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY . .
 
-CMD ["python", "src/main.py"]
-
-COPY . .
-
-CMD ["python", "src/main.py"]
+CMD ["python", "src/crew_assembly.py"]

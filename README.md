@@ -3,21 +3,41 @@
 
 ### Prerequisites
 - **Runner:** Ollama v0.1.x+
-- **Model:** `qwen2.5-coder:latest` (modified)
+- **Model:** `carstenuhlig/omnicoder-2-9b:latest` (fine tuned qwen3.5-9b)
 
 ### Model Config
 ```
-FROM qwen2.5-coder:latest
+FROM carstenuhlig/omnicoder-2-9b:latest
 
+# Core Parameters
 PARAMETER temperature 0.2
 PARAMETER top_p 0.9
 PARAMETER repeat_penalty 1.1
-PARAMETER num_ctx 8192
-PARAMETER num_predict 2048
-PARAMETER stop "</s>"
-PARAMETER stop "user:"
-PARAMETER stop "\n\n\n"
+PARAMETER num_ctx 16384
+PARAMETER num_predict 4096
+
+# Crucial Stop Tokens
+PARAMETER stop "<|im_start|>"
+PARAMETER stop "<|im_end|>"
+PARAMETER stop "Observation:"
+
+SYSTEM """
+You are a specialized agent in a Multi-Agent Scrum Simulation.
+You MUST use the following ReAct format to use tools:
+
+Thought: [Your reasoning about what to do]
+Action: [The exact tool name]
+Action Input: {"arg_name": "value"}
+
+Once you have the answer, use:
+Thought: I have the final answer.
+Final Answer: [Your full response]
+
+IMPORTANT: Never output a tool call inside a markdown code block. Never explain your tool choice before the 'Thought:' header.
+"""
 ```
+
+`ollama create omnicoder-crew -f ./Modelfile`
 
 ### Network Configuration
 To allow the agents to communicate with the model provider, the following environment variables are set:

@@ -6,3 +6,4 @@ langchain_community
 langchain-openai
 docker
 python-dotenv
+litellm

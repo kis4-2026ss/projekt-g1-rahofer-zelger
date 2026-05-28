@@ -12,6 +12,6 @@ services:
     environment:
       - PYTHONPATH=/app/src
       - HOME=/tmp
-    command: python src/main.py
+    command: python src/crew_assembly.py
     stdin_open: true
     tty: true
