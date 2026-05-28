@@ -2,6 +2,7 @@ import os
 import time
 import json
 import re
+import shutil
 from pathlib import Path
 
 from crewai.agents import AgentAction
@@ -43,13 +44,14 @@ Path(SRC_PATH).mkdir(parents=True, exist_ok=True)
 
 # --- 2. LLM Configuration (Optimized for Local Ollama Stability) ---
 llm_config = LLM(
-    model="ollama/qwen3.5-crew:latest",
+    model="ollama/omnicoder-agent:latest",
     base_url="http://localhost:11434",
+    timeout=600,
     extra_body={
         "options": {
             "num_ctx": 16384,
             "num_predict": 4096,
-            "stop": ["Observation:", "<|im_end|>", "###"]
+            "stop": ["Observation:", "<|im_end|>"]
         }
     }
 )
@@ -58,74 +60,78 @@ llm_config = LLM(
 base_shell = ShellTool()
 
 
-class GitTool(BaseTool):
-    name: str = "git_tool"
-    description: str = (
-        "Manage repository history. "
-        "Provide raw Git subcommands without the leading 'git'. "
-        "Usage: git_tool._run('commit -m \"feat: msg\"') or 'add . && commit -m \"...\"'"
-    )
+# --- Git Tool ---
+@tool("GitTool")
+def git_tool(command: str) -> str:
+    """
+    Manage repository history and version control.
+    Usage: git_tool(command="commit -m 'feat: add logic'") or git_tool(command="add .")
+    Note: Do not include the leading 'git' prefix. Remote operations (push/pull) are disabled.
+    """
+    if any(forbidden in command for forbidden in ["push", "pull", "remote"]):
+        return "Error: Remote operations are disabled for security."
 
-    def _run(self, command: str) -> str:
-        if any(forbidden in command for forbidden in ["push", "pull", "remote"]):
-            return "Error: Remote operations are disabled for security."
+    # Clean up leading 'git ' if the LLM accidentally includes it
+    clean_command = command.lstrip()
+    if clean_command.startswith("git "):
+        clean_command = clean_command[4:].lstrip()
 
-        if command.lstrip().startswith("git "):
-            command = command.lstrip()[4:].lstrip()
-
-        return base_shell.run(f"git -C {SRC_PATH} {command}")
-
-
-class DotNetTool(BaseTool):
-    name: str = "dotnet_tool"
-    description: str = "C# lifecycle management (build, test, run). Provide raw dotnet subcommands (e.g., 'build', 'run', 'test'). Do NOT include 'dotnet' prefix unless necessary."
-
-    def _run(self, command: str) -> str:
-        command = command.strip()
-        if not command:
-            return "Error: Empty command"
-
-        dangerous = ["nuget delete", "workload install", "tool install --global"]
-        if any(d in command for d in dangerous):
-            return "Error: Dangerous dotnet operations are disabled."
-
-        full_cmd = command if command.startswith("dotnet") else f"dotnet {command}"
-        return base_shell.run(full_cmd, cwd=SRC_PATH)
+    return base_shell.run(f"git -C {SRC_PATH} {clean_command}")
 
 
-class SafeFileReadTool(FileReadTool):
-    def _run(self, file_path: str, **kwargs) -> str:
-        full_path = (ALLOWED_BASE / file_path).resolve()
-        if not str(full_path).startswith(str(ALLOWED_BASE)):
-            return f"Error: Access denied – path outside agent_workspace: {file_path}"
-        if not full_path.exists():
-            return f"Error: File not found: {file_path}"
-        return super()._run(str(full_path), **kwargs)
+# --- .NET Tool ---
+@tool("DotNetTool")
+def dotnet_tool(command: str) -> str:
+    """
+    C# lifecycle management including build, test, and run.
+    Usage: dotnet_tool(command="build") or dotnet_tool(command="test")
+    Note: Provide raw subcommands. Dangerous operations like 'nuget delete' are disabled.
+    """
+    command = command.strip()
+    if not command:
+        return "Error: Empty command"
 
+    dangerous = ["nuget delete", "workload install", "tool install --global"]
+    if any(d in command for d in dangerous):
+        return "Error: Dangerous dotnet operations are disabled."
+
+    full_cmd = command if command.startswith("dotnet") else f"dotnet {command}"
+    return base_shell.run(full_cmd, cwd=SRC_PATH)
+
+
+# --- File Management Tools ---
 
 @tool("SafeFileWriter")
 def safe_file_writer(file_path: str, content: str) -> str:
-    """Writes content to a file, but only if the path is within agent_workspace."""
+    """
+    Writes text content to a specific file path within the workspace.
+    Usage: safe_file_writer(file_path="Models/User.cs", content="public class User {}")
+    """
     full_path = (ALLOWED_BASE / file_path).resolve()
     if not str(full_path).startswith(str(ALLOWED_BASE)):
         return f"Error: Access denied – cannot write outside agent_workspace: {file_path}"
+
     full_path.parent.mkdir(parents=True, exist_ok=True)
     try:
         with open(full_path, 'w', encoding='utf-8') as f:
             f.write(content)
-        return f"Successfully wrote to {full_path}"
+        return f"Successfully wrote to {file_path}"
     except Exception as e:
         return f"Error writing file: {e}"
 
 
 @tool("SafeFileRead")
 def safe_file_read(file_path: str) -> str:
-    """Reads a file, but only if the path is within agent_workspace."""
+    """
+    Reads the content of a file within the workspace.
+    Usage: safe_file_read(file_path="Program.cs")
+    """
     full_path = (ALLOWED_BASE / file_path).resolve()
     if not str(full_path).startswith(str(ALLOWED_BASE)):
         return f"Error: Access denied – path outside agent_workspace: {file_path}"
     if not full_path.exists():
         return f"Error: File not found: {file_path}"
+
     try:
         with open(full_path, 'r', encoding='utf-8') as f:
             return f.read()
@@ -135,12 +141,16 @@ def safe_file_read(file_path: str) -> str:
 
 @tool("SafeDirectoryRead")
 def safe_directory_read(directory_path: str = ".") -> str:
-    """Lists directory contents, but only if the path is within agent_workspace."""
+    """
+    Lists all files and directories within a specific path.
+    Usage: safe_directory_read(directory_path="Controllers")
+    """
     full_path = (ALLOWED_BASE / directory_path).resolve()
     if not str(full_path).startswith(str(ALLOWED_BASE)):
         return f"Error: Access denied – directory outside agent_workspace: {directory_path}"
     if not full_path.is_dir():
         return f"Error: Not a directory: {directory_path}"
+
     try:
         items = '\n'.join(str(p.relative_to(ALLOWED_BASE)) for p in full_path.iterdir())
         return f"Contents of {directory_path}:\n{items}"
@@ -150,7 +160,10 @@ def safe_directory_read(directory_path: str = ".") -> str:
 
 @tool("SafeFileRemove")
 def safe_file_remove(file_path: str) -> str:
-    """Deletes a file, but only if the path is within agent_workspace."""
+    """
+    Permanently deletes a file from the workspace.
+    Usage: safe_file_remove(file_path="temp_file.txt")
+    """
     full_path = (ALLOWED_BASE / file_path).resolve()
     if not str(full_path).startswith(str(ALLOWED_BASE)):
         return f"Error: Access denied – cannot delete outside agent_workspace: {file_path}"
@@ -158,24 +171,48 @@ def safe_file_remove(file_path: str) -> str:
         return f"Error: File not found: {file_path}"
     if full_path.is_dir():
         return f"Error: Path is a directory, not a file: {file_path}"
+
     try:
         full_path.unlink()
-        return f"Successfully deleted: {full_path}"
+        return f"Successfully deleted: {file_path}"
     except Exception as e:
         return f"Error deleting file: {e}"
 
 
-git_tool = GitTool()
-dotnet_tool = DotNetTool()
-file_tools = [safe_file_read, safe_file_writer, safe_directory_read, safe_file_remove]
+@tool("SafeFileMove")
+def safe_file_move(source_path: str, destination_path: str) -> str:
+    """
+    Moves or renames a file or directory within the workspace.
+    Usage: safe_file_move(source_path="old_name.cs", destination_path="NewName.cs")
+    """
+    src_full = (ALLOWED_BASE / source_path).resolve()
+    dest_full = (ALLOWED_BASE / destination_path).resolve()
 
+    # Security: Check both paths
+    for path, label in [(src_full, "source"), (dest_full, "destination")]:
+        if not str(path).startswith(str(ALLOWED_BASE)):
+            return f"Error: Access denied – {label} is outside workspace: {path}"
 
+    if not src_full.exists():
+        return f"Error: Source file not found: {source_path}"
+
+    try:
+        # Ensure destination directory exists
+        dest_full.parent.mkdir(parents=True, exist_ok=True)
+
+        shutil.move(str(src_full), str(dest_full))
+        return f"Successfully moved/renamed {source_path} to {destination_path}"
+    except Exception as e:
+        return f"Error moving file: {e}"
+
+file_tools = [safe_file_read, safe_file_writer, safe_directory_read, safe_file_remove, safe_file_move]
 # --- 4. State Definition ---
 class ScrumState(TypedDict):
     next_node: str
     role_violation_flag: bool
     messages: Annotated[list, add]
     qa_dev_iterations: int
+    project_structure: str
 
     # artifacts
     product_backlog: List[Dict[str, str]]
@@ -183,6 +220,16 @@ class ScrumState(TypedDict):
     current_increment: Dict[str, str]
     qa_results: Dict[str, Any]
 
+def get_project_map(root_path: Path) -> str:
+    """Generates a text-based tree of the workspace to prevent duplicate creation."""
+    tree = []
+    for path in sorted(root_path.rglob('*')):
+        if path.name.startswith(('.', 'bin', 'obj')): # Ignore build artifacts
+            continue
+        depth = len(path.relative_to(root_path).parts)
+        spacer = '  ' * (depth - 1)
+        tree.append(f"{spacer}- {path.name} {'(DIR)' if path.is_dir() else ''}")
+    return "\n".join(tree) if tree else "Workspace is currently empty."
 
 # --- 5. Agent Definitions ---
 product_owner = Agent(
@@ -198,7 +245,11 @@ product_owner = Agent(
     2. Write ONLY Gherkin (Given/When/Then).
     3. MANDATORY: Maintain Root README.md in {ISSUES_PATH}.
     4. Ensure math for Advanced Circuits (10/min) matches standard Factorio ratios.
-    5. NO CODE. NO XAML."""
+    5. NO CODE. NO XAML.
+    6. ATOMICITY: Check existing specs in the workspace structure to avoid duplicating 
+       Gherkin stories or requirements.
+    {project_structure}
+    """
 )
 
 scrum_master = Agent(
@@ -210,8 +261,12 @@ scrum_master = Agent(
     verbose=True,
     allow_delegation=False,
     system_template="""{system_message}
-    1. Output JSON backlogs and Audit Reports.
-    2. REJECT if: Missing READMEs, missing Conventional Commits, or PO wrote source code."""
+        1. Output JSON backlogs and Audit Reports.
+        2. REJECT if: Missing READMEs, missing Conventional Commits, or PO wrote code.
+        3. CASING AUDIT: Reject work if the developer created duplicate files with 
+           different casing or redundant naming. Reference the workspace structure:
+        {project_structure}
+        """
 )
 
 developer = Agent(
@@ -223,12 +278,16 @@ developer = Agent(
     verbose=True,
     allow_delegation=False,
     system_template="""{system_message}
-    1. Write C# (dotnet_tool is available with .NET 8.0) and Avalonia XAML only.
-    2. MANDATORY: Every subsystem folder needs its own README.md.
-    3. Use safe_directory_read before every modification to maintain context.
-    4. Implement math: T = (Recipe Output / Crafting Time) * Machine Speed.
-    5. The factorio_recipes_and_machines.json is your single source of truth when it comes to ingame recipes and machines.
-    6. Commit after every feature, use the tools git_tool."""
+        1. Write C# (use dotnet_tool) and Avalonia XAML only.
+        2. MANDATORY: Every subsystem folder needs its own README.md.
+        3. SINGLETON ARCHITECT: Before creating any file, check the CURRENT WORKSPACE below. 
+           If a file exists with different casing (e.g., 'models' vs 'Models'), REUSE the existing one.
+        4. Use safe_directory_read before every modification to maintain context.
+        5. Implement math: T = (Recipe Output / Crafting Time) * Machine Speed.
+        6. Use factorio_recipes_and_machines.json as the single source of truth.
+        7. CURRENT WORKSPACE:
+        {project_structure} 
+        """  # ^ This placeholder is key
 )
 
 qa_tester = Agent(
@@ -252,12 +311,16 @@ qa_tester = Agent(
 # --- 6. Node Logic ---
 def execute_with_retry(agent, task_desc, max_retries=10):
     """Execute a task with retry on empty response."""
-    for attempt in range(max_retries):
-        task = Task(description=task_desc, agent=agent, expected_output="Defined artifact.")
-        res_obj = task.execute_sync()
-        result_str = str(res_obj)
-        if result_str and len(result_str.strip()) > 0:
-            return result_str
+    try:
+        for attempt in range(max_retries):
+            task = Task(description=task_desc, agent=agent, expected_output="Defined artifact.")
+            res_obj = task.execute_sync()
+            result_str = str(res_obj)
+            if result_str and len(result_str.strip()) > 0:
+                return result_str
+            time.sleep(2)
+    except Exception as e:
+        print(f"Error occurred: {e}")
         print(f"Empty response, retry {attempt + 1}/{max_retries}")
         time.sleep(2)
     return ""
@@ -317,25 +380,34 @@ def scrum_master_node(state: ScrumState) -> Dict:
 
 
 def developer_node(state: ScrumState) -> Dict:
+    # 1. Physical Reality Check
+    current_map = get_project_map(ALLOWED_BASE)
+
     specs = state.get("current_increment", {}).get("specs", "")
-    latest_message = state["messages"][-1] if state["messages"] else ""
-    qa_report = state.get("qa_results", {}).get("report", "")
 
-    feedback_context = ""
-    if state.get("role_violation_flag"):
-        feedback_context = f"\nYOUR PREVIOUS CODE WAS REJECTED BY THE SCRUM MASTER. Fix it based on this feedback:\n{latest_message}"
-    elif state.get("qa_results", {}).get("passed") is False:
-        feedback_context = f"\nYOUR PREVIOUS CODE FAILED QA TESTING. Fix the bugs detailed in this report:\n{qa_report}"
+    # 2. Hard-coded Naming Policy
+    naming_policy = """
+    NAMING POLICY:
+    - Use PascalCase for all C# files and directories.
+    - Check the EXISTING STRUCTURE below. If a folder/file exists with different casing, 
+      REUSE it or RENAME it; do not create a duplicate.
+    """
 
-    prompt = f"Review {SRC_PATH}. Implement specs: {specs}. \n{feedback_context}\nUpdate Subsystem READMEs and Commit via Git."
+    prompt = f"""
+    {naming_policy}
+
+    CURRENT WORKSPACE STRUCTURE:
+    {current_map}
+
+    TASK: Implement specs: {specs}.
+    """
+
     output = execute_with_retry(developer, prompt)
-
-    current_inc = state.get("current_increment", {})
-    current_inc["code"] = output
 
     return {
         "messages": ["DA: Work complete."],
-        "current_increment": current_inc,
+        "project_structure": current_map,  # Update state
+        "current_increment": {"code": output, "specs": specs},
         "next_node": "scrum_master"
     }
 
