@@ -39,12 +39,12 @@ Path(SRC_PATH).mkdir(parents=True, exist_ok=True)
 
 # --- 2. LLM Configuration (using stable Qwen model) ---
 llm_config = LLM(
-    model="ollama/qwen2.5-coder:7b-instruct",
+    model="ollama/omnicoder-crew:latest",
     base_url="http://localhost:11434",
     timeout=600,
     extra_body={
         "options": {
-            "num_ctx": 8192,
+            "num_ctx": 16384,
             "num_predict": 4096,
             "stop": ["Observation:", "<|im_end|>"]
         }
