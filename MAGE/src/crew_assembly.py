@@ -1,11 +1,10 @@
 import os
 import time
-import json
-import re
+import shlex
+import subprocess
 import shutil
 from pathlib import Path
 
-from crewai.agents import AgentAction
 from dotenv import load_dotenv
 from typing import Dict, List, Annotated, Any
 from operator import add
@@ -13,19 +12,15 @@ from typing_extensions import TypedDict
 
 # CrewAI & LangGraph Imports
 from crewai import Agent, Task, LLM
-from crewai_tools import FileReadTool
-from crewai.agents.parser import AgentAction, AgentFinish
 from crewai.tools import tool
-from langchain_community.tools import ShellTool
 from langgraph.graph import StateGraph, END
-from crewai.tools import BaseTool
 
 # --- 1. Path, Environment & Global Config Setup ---
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 load_dotenv(PROJECT_ROOT / ".env")
 
-# Global Iteration Limit for QA -> Developer loop
-MAX_QA_DEV_ITERATIONS = 500000
+# Global Iteration Limit for QA -> Developer loop (reduced from 500k)
+MAX_QA_DEV_ITERATIONS = 10
 
 # Resolve workspace paths from environment or defaults
 raw_issues_path = os.getenv("AGENT_ISSUES_PATH", "./agent_workspace/issues")
@@ -42,14 +37,14 @@ os.environ["CREWAI_TOOLS_ALLOW_UNSAFE_PATHS"] = "true"
 Path(ISSUES_PATH).mkdir(parents=True, exist_ok=True)
 Path(SRC_PATH).mkdir(parents=True, exist_ok=True)
 
-# --- 2. LLM Configuration (Optimized for Local Ollama Stability) ---
+# --- 2. LLM Configuration (using stable Qwen model) ---
 llm_config = LLM(
-    model="ollama/omnicoder-agent:latest",
+    model="ollama/qwen2.5-coder:7b-instruct",   # more reliable than omnicoder-agent
     base_url="http://localhost:11434",
     timeout=600,
     extra_body={
         "options": {
-            "num_ctx": 16384,
+            "num_ctx": 8192,
             "num_predict": 4096,
             "stop": ["Observation:", "<|im_end|>"]
         }
@@ -57,7 +52,47 @@ llm_config = LLM(
 )
 
 # --- 3. Custom Tools ---
-base_shell = ShellTool()
+def _resolve_workspace_path(input_path: str) -> Path:
+    """Resolve a user supplied path and ensure it stays inside agent_workspace."""
+    candidate = Path(input_path)
+    if candidate.is_absolute():
+        full_path = candidate.resolve()
+    else:
+        full_path = (ALLOWED_BASE / candidate).resolve()
+
+    try:
+        full_path.relative_to(ALLOWED_BASE)
+    except ValueError as exc:
+        raise ValueError(f"path outside agent_workspace: {input_path}") from exc
+
+    return full_path
+
+
+def _run_command(args: List[str], cwd: Path, timeout: int = 120) -> str:
+    try:
+        result = subprocess.run(
+            args,
+            cwd=cwd,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            check=False
+        )
+    except subprocess.TimeoutExpired:
+        return f"Error: command timed out after {timeout} seconds: {shlex.join(args)}"
+    except FileNotFoundError:
+        return f"Error: command not found: {args[0]}"
+    except Exception as e:
+        return f"Error executing command: {e}"
+
+    output = result.stdout + result.stderr
+    if result.returncode != 0:
+        return f"Command failed with exit code {result.returncode}:\n{output}"
+    return output
+
+
+def _command_failed(output: str) -> bool:
+    return output.startswith("Command failed") or output.startswith("Error:")
 
 
 # --- Git Tool ---
@@ -68,18 +103,25 @@ def git_tool(command: str) -> str:
     Usage: git_tool(command="commit -m 'feat: add logic'") or git_tool(command="add .")
     Note: Do not include the leading 'git' prefix. Remote operations (push/pull) are disabled.
     """
-    if any(forbidden in command for forbidden in ["push", "pull", "remote"]):
+    try:
+        args = shlex.split(command)
+    except ValueError as e:
+        return f"Error: Invalid git command: {e}"
+
+    if args[:1] == ["git"]:
+        args = args[1:]
+    if not args:
+        return "Error: Empty git command"
+
+    if args[0] in {"push", "pull", "remote", "fetch"}:
         return "Error: Remote operations are disabled for security."
+    if "-C" in args or any(arg.startswith(("--git-dir", "--work-tree")) for arg in args):
+        return "Error: Changing git repository paths is disabled."
 
-    # Clean up leading 'git ' if the LLM accidentally includes it
-    clean_command = command.lstrip()
-    if clean_command.startswith("git "):
-        clean_command = clean_command[4:].lstrip()
-
-    return base_shell.run(f"git -C {SRC_PATH} {clean_command}")
+    return _run_command(["git", *args], Path(SRC_PATH), timeout=60)
 
 
-# --- .NET Tool ---
+# --- .NET Tool (improved with timeout and direct subprocess) ---
 @tool("DotNetTool")
 def dotnet_tool(command: str) -> str:
     """
@@ -87,29 +129,38 @@ def dotnet_tool(command: str) -> str:
     Usage: dotnet_tool(command="build") or dotnet_tool(command="test")
     Note: Provide raw subcommands. Dangerous operations like 'nuget delete' are disabled.
     """
-    command = command.strip()
-    if not command:
+    try:
+        args = shlex.split(command)
+    except ValueError as e:
+        return f"Error: Invalid dotnet command: {e}"
+
+    if args[:1] == ["dotnet"]:
+        args = args[1:]
+    if not args:
         return "Error: Empty command"
 
-    dangerous = ["nuget delete", "workload install", "tool install --global"]
-    if any(d in command for d in dangerous):
+    dangerous = (
+        args[:2] == ["nuget", "delete"]
+        or args[:2] == ["workload", "install"]
+        or (args[:2] == ["tool", "install"] and "--global" in args)
+    )
+    if dangerous:
         return "Error: Dangerous dotnet operations are disabled."
 
-    full_cmd = command if command.startswith("dotnet") else f"dotnet {command}"
-    return base_shell.run(full_cmd, cwd=SRC_PATH)
+    return _run_command(["dotnet", *args], Path(SRC_PATH), timeout=120)
 
 
-# --- File Management Tools ---
-
+# --- File Management Tools (unchanged) ---
 @tool("SafeFileWriter")
 def safe_file_writer(file_path: str, content: str) -> str:
     """
     Writes text content to a specific file path within the workspace.
     Usage: safe_file_writer(file_path="Models/User.cs", content="public class User {}")
     """
-    full_path = (ALLOWED_BASE / file_path).resolve()
-    if not str(full_path).startswith(str(ALLOWED_BASE)):
-        return f"Error: Access denied – cannot write outside agent_workspace: {file_path}"
+    try:
+        full_path = _resolve_workspace_path(file_path)
+    except ValueError as e:
+        return f"Error: Access denied – cannot write {e}"
 
     full_path.parent.mkdir(parents=True, exist_ok=True)
     try:
@@ -126,9 +177,10 @@ def safe_file_read(file_path: str) -> str:
     Reads the content of a file within the workspace.
     Usage: safe_file_read(file_path="Program.cs")
     """
-    full_path = (ALLOWED_BASE / file_path).resolve()
-    if not str(full_path).startswith(str(ALLOWED_BASE)):
-        return f"Error: Access denied – path outside agent_workspace: {file_path}"
+    try:
+        full_path = _resolve_workspace_path(file_path)
+    except ValueError as e:
+        return f"Error: Access denied – {e}"
     if not full_path.exists():
         return f"Error: File not found: {file_path}"
 
@@ -145,14 +197,15 @@ def safe_directory_read(directory_path: str = ".") -> str:
     Lists all files and directories within a specific path.
     Usage: safe_directory_read(directory_path="Controllers")
     """
-    full_path = (ALLOWED_BASE / directory_path).resolve()
-    if not str(full_path).startswith(str(ALLOWED_BASE)):
-        return f"Error: Access denied – directory outside agent_workspace: {directory_path}"
+    try:
+        full_path = _resolve_workspace_path(directory_path)
+    except ValueError as e:
+        return f"Error: Access denied – {e}"
     if not full_path.is_dir():
         return f"Error: Not a directory: {directory_path}"
 
     try:
-        items = '\n'.join(str(p.relative_to(ALLOWED_BASE)) for p in full_path.iterdir())
+        items = '\n'.join(str(p.relative_to(ALLOWED_BASE)) for p in sorted(full_path.iterdir()))
         return f"Contents of {directory_path}:\n{items}"
     except Exception as e:
         return f"Error reading directory: {e}"
@@ -164,9 +217,10 @@ def safe_file_remove(file_path: str) -> str:
     Permanently deletes a file from the workspace.
     Usage: safe_file_remove(file_path="temp_file.txt")
     """
-    full_path = (ALLOWED_BASE / file_path).resolve()
-    if not str(full_path).startswith(str(ALLOWED_BASE)):
-        return f"Error: Access denied – cannot delete outside agent_workspace: {file_path}"
+    try:
+        full_path = _resolve_workspace_path(file_path)
+    except ValueError as e:
+        return f"Error: Access denied – cannot delete {e}"
     if not full_path.exists():
         return f"Error: File not found: {file_path}"
     if full_path.is_dir():
@@ -185,16 +239,16 @@ def safe_file_move(source_path: str, destination_path: str) -> str:
     Moves or renames a file or directory within the workspace.
     Usage: safe_file_move(source_path="old_name.cs", destination_path="NewName.cs")
     """
-    src_full = (ALLOWED_BASE / source_path).resolve()
-    dest_full = (ALLOWED_BASE / destination_path).resolve()
-
-    # Security: Check both paths
-    for path, label in [(src_full, "source"), (dest_full, "destination")]:
-        if not str(path).startswith(str(ALLOWED_BASE)):
-            return f"Error: Access denied – {label} is outside workspace: {path}"
+    try:
+        src_full = _resolve_workspace_path(source_path)
+        dest_full = _resolve_workspace_path(destination_path)
+    except ValueError as e:
+        return f"Error: Access denied – {e}"
 
     if not src_full.exists():
         return f"Error: Source file not found: {source_path}"
+    if dest_full.exists():
+        return f"Error: Destination already exists: {destination_path}"
 
     try:
         # Ensure destination directory exists
@@ -205,7 +259,9 @@ def safe_file_move(source_path: str, destination_path: str) -> str:
     except Exception as e:
         return f"Error moving file: {e}"
 
+
 file_tools = [safe_file_read, safe_file_writer, safe_directory_read, safe_file_remove, safe_file_move]
+
 # --- 4. State Definition ---
 class ScrumState(TypedDict):
     next_node: str
@@ -220,16 +276,32 @@ class ScrumState(TypedDict):
     current_increment: Dict[str, str]
     qa_results: Dict[str, Any]
 
+
 def get_project_map(root_path: Path) -> str:
-    """Generates a text-based tree of the workspace to prevent duplicate creation."""
+    """
+    Generates a filtered text-based tree of the workspace.
+    Excludes .git, bin/obj, Debug/Release, and hidden files to keep context small.
+    """
     tree = []
     for path in sorted(root_path.rglob('*')):
-        if path.name.startswith(('.', 'bin', 'obj')): # Ignore build artifacts
+        # Skip entire .git directory
+        if '.git' in path.parts:
+            continue
+        # Skip bin/obj/Debug/Release folders anywhere
+        if any(part in ['bin', 'obj', 'Debug', 'Release', 'packages'] for part in path.parts):
+            continue
+        # Skip hidden files/folders
+        if path.name.startswith('.'):
             continue
         depth = len(path.relative_to(root_path).parts)
         spacer = '  ' * (depth - 1)
         tree.append(f"{spacer}- {path.name} {'(DIR)' if path.is_dir() else ''}")
+        # Truncate if too large (safety)
+        if len(tree) > 500:
+            tree.append("  ... (truncated)")
+            break
     return "\n".join(tree) if tree else "Workspace is currently empty."
+
 
 # --- 5. Agent Definitions ---
 product_owner = Agent(
@@ -287,9 +359,10 @@ developer = Agent(
         6. Use factorio_recipes_and_machines.json as the single source of truth.
         7. CURRENT WORKSPACE:
         {project_structure} 
-        """  # ^ This placeholder is key
+        """
 )
 
+# Updated QA agent: must write test files to disk, not just return JSON
 qa_tester = Agent(
     role="QA Tester",
     goal="Verify math accuracy and system integrity via xUnit tests.",
@@ -299,31 +372,27 @@ qa_tester = Agent(
     verbose=True,
     allow_delegation=False,
     system_template="""{system_message}
-    1. Write C# test projects based on Gherkin specs.
-    2. You MUST use the `dotnet_tool` to run the tests. Do not guess the results.
-    3. Your final output MUST be a valid JSON block containing exactly these two keys:
-       - "tests_executed": boolean (true if you actually ran dotnet test, false otherwise)
-       - "all_passed": boolean (true ONLY if the dotnet_tool reported 0 failures)
-    Do not include any text after the JSON block."""
+    1. Write C# xUnit test files using safe_file_writer. Place them in the existing test project (e.g., FactorioModeler.Tests/).
+    2. Base your tests on the Gherkin specs provided in the task.
+    3. After writing the tests, reply exactly with 'TESTS_WRITTEN'.
+    """
 )
 
 
 # --- 6. Node Logic ---
 def execute_with_retry(agent, task_desc, max_retries=10):
-    """Execute a task with retry on empty response."""
-    try:
-        for attempt in range(max_retries):
+    """Execute a task with retry on empty response. Returns error string if all fail."""
+    for attempt in range(max_retries):
+        try:
             task = Task(description=task_desc, agent=agent, expected_output="Defined artifact.")
             res_obj = task.execute_sync()
             result_str = str(res_obj)
             if result_str and len(result_str.strip()) > 0:
                 return result_str
-            time.sleep(2)
-    except Exception as e:
-        print(f"Error occurred: {e}")
-        print(f"Empty response, retry {attempt + 1}/{max_retries}")
+        except Exception as e:
+            print(f"Error on attempt {attempt+1}/{max_retries}: {e}")
         time.sleep(2)
-    return ""
+    return "[ERROR] Agent failed to produce a non-empty response."
 
 
 def product_owner_node(state: ScrumState) -> Dict:
@@ -346,7 +415,14 @@ def scrum_master_node(state: ScrumState) -> Dict:
     latest_specs = state.get("current_increment", {}).get("specs", "")
     latest_code = state.get("current_increment", {}).get("code", "")
 
+    # Validate non-empty specs before allowing developer
     if latest_specs and not latest_code:
+        if not latest_specs.strip() or len(latest_specs.strip()) < 50:
+            return {
+                "next_node": "product_owner",
+                "messages": ["SMA: Empty or insufficient spec – returning to Product Owner."]
+            }
+
         audit_context = f"""
             Audit Specs: {latest_specs}. 
             Verify READMEs and check for role violations. If valid, reply exactly with 'PROCEED'.
@@ -380,12 +456,16 @@ def scrum_master_node(state: ScrumState) -> Dict:
 
 
 def developer_node(state: ScrumState) -> Dict:
-    # 1. Physical Reality Check
+    specs = state.get("current_increment", {}).get("specs", "")
+    # Reject empty spec
+    if not specs or len(specs.strip()) < 50:
+        return {
+            "messages": ["DA: Received empty or insufficient spec – routing back to Product Owner"],
+            "next_node": "product_owner"
+        }
+
     current_map = get_project_map(ALLOWED_BASE)
 
-    specs = state.get("current_increment", {}).get("specs", "")
-
-    # 2. Hard-coded Naming Policy
     naming_policy = """
     NAMING POLICY:
     - Use PascalCase for all C# files and directories.
@@ -406,51 +486,70 @@ def developer_node(state: ScrumState) -> Dict:
 
     return {
         "messages": ["DA: Work complete."],
-        "project_structure": current_map,  # Update state
+        "project_structure": current_map,
         "current_increment": {"code": output, "specs": specs},
         "next_node": "scrum_master"
     }
 
 
 def qa_tester_node(state: ScrumState) -> Dict:
-    specs = state.get("current_increment", {}).get("specs", "")
+    # Check iteration limit
     iterations = state.get("qa_dev_iterations", 0)
+    if iterations >= MAX_QA_DEV_ITERATIONS:
+        return {
+            "qa_results": {"tests_executed": False, "all_passed": False},
+            "next_node": "end",
+            "messages": [f"Max iterations ({MAX_QA_DEV_ITERATIONS}) reached – stopping."]
+        }
 
-    prompt = f"Test the implementation in {SRC_PATH} against specs: {specs}."
-    output = execute_with_retry(qa_tester, prompt)
+    specs = state.get("current_increment", {}).get("specs", "")
+    if not specs or len(specs.strip()) < 50:
+        return {
+            "qa_results": {"tests_executed": False, "all_passed": False},
+            "next_node": "developer",
+            "messages": ["QA: No valid specs – cannot write tests."]
+        }
 
-    passed = False
-    json_match = re.search(r'\{.*\}', output.replace('\n', ''))
-    if json_match:
-        try:
-            result_data = json.loads(json_match.group(0))
-            passed = result_data.get("tests_executed", False) and result_data.get("all_passed", False)
-        except json.JSONDecodeError:
-            passed = False
-            output += "\n[SYSTEM: Failed to parse QA output as JSON.]"
+    # 1. QA agent writes test files
+    prompt = f"Write xUnit tests for these specs:\n{specs}"
+    response = execute_with_retry(qa_tester, prompt, max_retries=3)
+    if "TESTS_WRITTEN" not in response:
+        return {
+            "qa_results": {"tests_executed": False, "all_passed": False},
+            "next_node": "developer",
+            "messages": ["QA: Agent failed to confirm test writing."]
+        }
 
-    qa_results = {
-        "passed": passed,
-        "report": output
-    }
+    # 2. Discover solution file (dynamic, not hardcoded)
+    sln_files = list(Path(SRC_PATH).glob("*.sln"))
+    if not sln_files:
+        return {
+            "qa_results": {"tests_executed": True, "all_passed": False},
+            "next_node": "developer",
+            "messages": ["QA: No .sln file found – cannot build."]
+        }
+    sln_name = sln_files[0].name
 
-    if passed:
-        next_node = "end"
-        msg = "QA Result: Passed. Finishing process."
-    else:
-        if iterations >= MAX_QA_DEV_ITERATIONS:
-            next_node = "end"
-            msg = f"QA Result: Failed - Max QA/Dev iterations ({MAX_QA_DEV_ITERATIONS}) reached."
-        else:
-            next_node = "developer"
-            msg = f"QA Result: Failed - Re-routing back to Developer (Iteration {iterations + 1}/{MAX_QA_DEV_ITERATIONS})."
-            iterations += 1
+    # 3. Build
+    build_out = dotnet_tool(f"build {shlex.quote(sln_name)} --no-restore")
+    if _command_failed(build_out):
+        return {
+            "qa_results": {"tests_executed": True, "all_passed": False},
+            "next_node": "developer",
+            "messages": [f"QA: Build failed:\n{build_out[:300]}"]
+        }
+
+    # 4. Test
+    test_out = dotnet_tool(f"test {shlex.quote(sln_name)} --no-build --verbosity normal")
+    passed = not _command_failed(test_out)
+
+    iterations += 1
 
     return {
-        "messages": [msg],
-        "qa_results": qa_results,
+        "qa_results": {"tests_executed": True, "all_passed": passed},
         "qa_dev_iterations": iterations,
-        "next_node": next_node
+        "next_node": "end" if passed else "developer",
+        "messages": [f"QA: {'Passed' if passed else 'Failed'} - {test_out[:200]}"]
     }
 
 
@@ -490,7 +589,6 @@ def main_loop(initial_state):
             print(f"\n[NODE]: {node}")
             if "messages" in update:
                 print(f"[LOG]: {update['messages'][-1]}")
-
 
 if __name__ == "__main__":
     initial_setup = {
