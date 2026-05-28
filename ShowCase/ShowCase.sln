@@ -1,0 +1,28 @@
+﻿
+Microsoft Visual Studio Solution File, Format Version 12.00
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "qwen3.5", "qwen3.5\qwen3.5.csproj", "{B56BFE8D-5F19-455E-8CEB-8ECE0AA55DB7}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "claude", "claude\claude.csproj", "{7E49D6E4-87B8-4470-8C2B-6B964607A833}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "omnicoder-dotnet", "omnicoder-dotnet\omnicoder-dotnet.csproj", "{49AC67CE-F113-4B4C-96E1-AE49F1B4A94C}"
+EndProject
+Global
+	GlobalSection(SolutionConfigurationPlatforms) = preSolution
+		Debug|Any CPU = Debug|Any CPU
+		Release|Any CPU = Release|Any CPU
+	EndGlobalSection
+	GlobalSection(ProjectConfigurationPlatforms) = postSolution
+		{B56BFE8D-5F19-455E-8CEB-8ECE0AA55DB7}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{B56BFE8D-5F19-455E-8CEB-8ECE0AA55DB7}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{B56BFE8D-5F19-455E-8CEB-8ECE0AA55DB7}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{B56BFE8D-5F19-455E-8CEB-8ECE0AA55DB7}.Release|Any CPU.Build.0 = Release|Any CPU
+		{7E49D6E4-87B8-4470-8C2B-6B964607A833}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{7E49D6E4-87B8-4470-8C2B-6B964607A833}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{7E49D6E4-87B8-4470-8C2B-6B964607A833}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{7E49D6E4-87B8-4470-8C2B-6B964607A833}.Release|Any CPU.Build.0 = Release|Any CPU
+		{49AC67CE-F113-4B4C-96E1-AE49F1B4A94C}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{49AC67CE-F113-4B4C-96E1-AE49F1B4A94C}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{49AC67CE-F113-4B4C-96E1-AE49F1B4A94C}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{49AC67CE-F113-4B4C-96E1-AE49F1B4A94C}.Release|Any CPU.Build.0 = Release|Any CPU
+	EndGlobalSection
+EndGlobal
