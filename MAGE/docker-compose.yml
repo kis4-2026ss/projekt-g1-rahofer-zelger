@@ -1,0 +1,17 @@
+services:
+  mage-scrum:
+    build: .
+    container_name: mage_scrum_orchestrator
+    network_mode: "host"
+    user: "1000:1000"
+    volumes:
+      - .:/app
+      - /var/run/docker.sock:/var/run/docker.sock
+    env_file:
+      - .env
+    environment:
+      - PYTHONPATH=/app/src
+      - HOME=/tmp
+    command: python src/crew_assembly.py
+    stdin_open: true
+    tty: true

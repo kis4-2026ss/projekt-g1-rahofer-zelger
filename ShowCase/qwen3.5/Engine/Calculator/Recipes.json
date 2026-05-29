@@ -1,0 +1,32 @@
+{
+  "advanced-circuit": {
+    "outputQty": 1,
+    "craftingTime": 6,
+    "resources": [
+      {"type": "pipe", "amount": 3},
+      {"type": "copper-plate", "amount": 8},
+      {"type": "iron-plate", "amount": 6}
+    ],
+    "machineType": "assembling-machine-2",
+    "circuitRequirement": "basic"
+  },
+  "express-splitter": {
+    "outputQty": 2,
+    "craftingTime": 30,
+    "resources": [
+      {"type": "wire", "amount": 25}
+    ],
+    "machineType": "assembling-machine-2",
+    "circuitRequirement": "advanced"
+  },
+  "item-furnace": {
+    "outputQty": 2,
+    "craftingTime": 15,
+    "resources": [
+      {"type": "fuel", "amount": 30},
+      {"type": "input", "amount": 5}
+    ],
+    "machineType": "furnace",
+    "circuitRequirement": "none"
+  }
+}
