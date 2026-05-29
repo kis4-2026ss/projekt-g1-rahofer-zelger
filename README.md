@@ -51,3 +51,19 @@ To allow the agents to communicate with the model provider, the following enviro
 
 ### Connection String
 The orchestrator connects via: `http://localhost:11434`
+
+### Starting the Application
+
+Start the full environment:
+
+`docker compose up --build -d`
+
+Restart the environment cleanly:
+
+`docker compose down --remove-orphans`
+
+`docker compose up --build -d`
+
+Attach to the orchestrator container logs/output:
+
+`docker attach mage_scrum_orchestrator`
